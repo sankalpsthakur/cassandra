@@ -28,6 +28,7 @@ import com.codahale.metrics.Reservoir;
 import com.codahale.metrics.Snapshot;
 import com.codahale.metrics.Timer;
 
+import static org.apache.cassandra.metrics.CassandraMetricsRegistry.DEFAULT_TIMER_UNIT;
 import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
 
 
@@ -89,7 +90,7 @@ public class LatencyMetrics
         this.aliasFactory = aliasFactory;
         this.namePrefix = namePrefix;
 
-        LatencyMetricsTimer timer = new LatencyMetrics.LatencyMetricsTimer(CassandraMetricsRegistry.createReservoir(TimeUnit.MICROSECONDS));
+        LatencyMetricsTimer timer = new LatencyMetrics.LatencyMetricsTimer(CassandraMetricsRegistry.createReservoir(DEFAULT_TIMER_UNIT));
         Counter counter = new LatencyMetricsCounter();
 
         if (aliasFactory == null)
