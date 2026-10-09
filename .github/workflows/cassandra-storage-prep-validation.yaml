@@ -1,0 +1,99 @@
+# Fork-only focused validation for CASSANDRA-14944 (bloom filter off: tombstones never purged) and the
+# BloomCalculations trivial-case fix (hash count and buckets per element swapped). Not part of either PR.
+name: Cassandra storage prep validation
+on:
+    push:
+        branches:
+            - 'validate/cassandra-storage-prep-**'
+permissions:
+    contents: read
+env:
+    # run-tests.sh exits 0 when tests fail (unless --summary, which hides the full output), so every run is
+    # judged from its JUnit XML: each listed class must have results, the expected failures must fail, and
+    # nothing else may fail. Usage: python3 -c "$CHECK_JUNIT" <Class,...> [<Class.method,...> expected to fail]
+    CHECK_JUNIT: |
+        import glob, sys
+        import xml.etree.ElementTree as ET
+        classes = sys.argv[1].split(',')
+        expected = set(sys.argv[2].split(',')) if len(sys.argv) > 2 else set()
+        files = sorted(glob.glob('build/**/TEST-*.xml', recursive=True))
+        print('\n'.join(files) or 'no TEST-*.xml found under build/')
+        results = {}
+        for f in files:
+            for case in ET.parse(f).getroot().iter('testcase'):
+                cls = case.get('classname', '').rsplit('.', 1)[-1]
+                if cls in classes:
+                    name = cls + '.' + case.get('name', '').split('-')[0]
+                    if case.find('failure') is not None or case.find('error') is not None:
+                        results[name] = 'FAILED'
+                    else:
+                        results.setdefault(name, 'skipped' if case.find('skipped') is not None else 'passed')
+        for name in sorted(results):
+            print(results[name], name)
+        problems = ['no results for ' + c for c in classes if not any(n.startswith(c + '.') for n in results)]
+        problems += ['expected to fail but ' + results.get(n, 'missing') + ': ' + n for n in sorted(expected) if results.get(n) != 'FAILED']
+        problems += ['unexpected failure: ' + n for n in sorted(results) if results[n] == 'FAILED' and n not in expected]
+        print('\n'.join(problems) or 'OK')
+        sys.exit(1 if problems else 0)
+jobs:
+    # Both fixes applied: the new tests and the existing tests around them must pass.
+    storage-prep-tests-jdk17:
+        runs-on: ubuntu-latest
+        timeout-minutes: 180
+        steps:
+          - name: Checkout code
+            uses: actions/checkout@v4
+          - name: JDK 17
+            uses: actions/setup-java@v4
+            with:
+              java-version: '17'
+              distribution: 'temurin'
+          - name: Show the commits under test
+            run: git log --oneline -4
+          - name: Build jars (run-tests.sh needs a prior build)
+            run: .build/docker/build-jars.sh 17
+          # -t takes a comma-separated list. Each entry is a grep pattern over test/unit paths, and the
+          # leading slash keeps /BloomFilterTest from also matching CompactionDisabledBloomFilterTest.
+          - name: Run the new and related tests (default sstable format, BIG)
+            run: .build/docker/run-tests.sh -a test -t /CompactionControllerTest,/BloomCalculationsTest,/BloomFilterTest,/SSTableReaderTest,/CompactionDisabledBloomFilterTest -j 17
+          - name: Check the default format results
+            run: python3 -c "$CHECK_JUNIT" CompactionControllerTest,BloomCalculationsTest,BloomFilterTest,SSTableReaderTest,CompactionDisabledBloomFilterTest
+          # run-tests.sh deletes build/test/output when it starts, so each run is checked before the next one
+          - name: Run the sstable format dependent tests with test-latest (BTI)
+            if: ${{ !cancelled() }}
+            run: .build/docker/run-tests.sh -a test-latest -t /CompactionControllerTest,/SSTableReaderTest,/CompactionDisabledBloomFilterTest -j 17
+          - name: Check the test-latest results
+            if: ${{ !cancelled() }}
+            run: python3 -c "$CHECK_JUNIT" CompactionControllerTest,SSTableReaderTest,CompactionDisabledBloomFilterTest
+
+    # Both fixes reverted, new tests kept: the two new tests must fail and every other test in their classes must pass.
+    new-tests-fail-without-fixes-jdk17:
+        runs-on: ubuntu-latest
+        timeout-minutes: 180
+        env:
+            # apache/cassandra trunk commit that this branch was cut from
+            BASE_SHA: 0e2f6d360803b8e9a1db3423de68541af1f542d1
+            # failures are expected here, so skip run-tests.sh's docker debug dump
+            SKIP_DOCKER_DEBUG_ON_FAIL: true
+        steps:
+          - name: Checkout code
+            uses: actions/checkout@v4
+          - name: JDK 17
+            uses: actions/setup-java@v4
+            with:
+              java-version: '17'
+              distribution: 'temurin'
+          - name: Restore the unfixed sources from the base commit, keeping the new tests
+            run: |
+              git fetch --no-tags --depth=1 https://github.com/apache/cassandra.git "$BASE_SHA"
+              git checkout "$BASE_SHA" -- src/java/org/apache/cassandra/io/sstable/format/SSTableReaderWithFilter.java src/java/org/apache/cassandra/utils/BloomCalculations.java
+              git status --short
+              grep -n 'isInformative() && getPosition' src/java/org/apache/cassandra/io/sstable/format/SSTableReaderWithFilter.java
+              grep -n 'new BloomSpecification(2, optKPerBuckets' src/java/org/apache/cassandra/utils/BloomCalculations.java
+          - name: Build jars (run-tests.sh needs a prior build)
+            run: .build/docker/build-jars.sh 17
+          - name: Run the new test classes (the new tests are expected to fail)
+            continue-on-error: true
+            run: .build/docker/run-tests.sh -a test -t /CompactionControllerTest,/BloomCalculationsTest -j 17
+          - name: Check that exactly the two new tests failed
+            run: python3 -c "$CHECK_JUNIT" CompactionControllerTest,BloomCalculationsTest CompactionControllerTest.testMaxPurgeableTimestampWithoutBloomFilter,BloomCalculationsTest.testComputeBloomSpecForHighFalsePositiveChance
