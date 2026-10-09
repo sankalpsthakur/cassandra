@@ -146,7 +146,7 @@ public class BloomCalculations
         // Handle the trivial cases
         if(maxFalsePosProb >= probs[minBuckets][minK])
         {
-            return new BloomSpecification(2, optKPerBuckets[2]);
+            return new BloomSpecification(optKPerBuckets[2], 2);
         }
         if (maxFalsePosProb < probs[maxBucketsPerElement][maxK])
         {
