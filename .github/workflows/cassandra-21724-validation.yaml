@@ -20,5 +20,7 @@ jobs:
               distribution: 'temurin'
           - name: Show the commits under test
             run: git log --oneline -4
+          - name: Build jars (run-tests.sh needs a prior build)
+            run: .build/docker/build-jars.sh 17
           - name: Run TableMetricTablesTest
             run: .build/docker/run-tests.sh -a test -t TableMetricTablesTest -j 17
