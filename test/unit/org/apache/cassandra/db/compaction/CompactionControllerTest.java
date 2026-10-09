@@ -19,6 +19,7 @@
 package org.apache.cassandra.db.compaction;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -50,6 +51,7 @@ import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
+import org.apache.cassandra.io.sstable.format.SSTableReaderWithFilter;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -66,6 +68,7 @@ public class CompactionControllerTest extends SchemaLoader
     private static final String KEYSPACE = "CompactionControllerTest";
     private static final String CF1 = "Standard1";
     private static final String CF2 = "Standard2";
+    private static final String CF_NO_BLOOM_FILTER = "NoBloomFilter";
     private static final int TTL_SECONDS = 10;
     private static CountDownLatch compaction2FinishLatch = new CountDownLatch(1);
     private static CountDownLatch createCompactionControllerLatch = new CountDownLatch(1);
@@ -86,7 +89,12 @@ public class CompactionControllerTest extends SchemaLoader
                                     TableMetadata.builder(KEYSPACE, CF2)
                                                  .addPartitionKeyColumn("pk", AsciiType.instance)
                                                  .addClusteringColumn("ck", AsciiType.instance)
-                                                 .addRegularColumn("val", AsciiType.instance));
+                                                 .addRegularColumn("val", AsciiType.instance),
+                                    TableMetadata.builder(KEYSPACE, CF_NO_BLOOM_FILTER)
+                                                 .addPartitionKeyColumn("pk", AsciiType.instance)
+                                                 .addClusteringColumn("ck", AsciiType.instance)
+                                                 .addRegularColumn("val", AsciiType.instance)
+                                                 .bloomFilterFpChance(1.0));
     }
 
     @Test
@@ -153,6 +161,60 @@ public class CompactionControllerTest extends SchemaLoader
             applyMutation(cfs.metadata(), key, timestamp1);
 
             assertPurgeBoundary(controller.getPurgeEvaluator(key), timestamp3);
+        }
+    }
+
+    /**
+     * With bloom_filter_fp_chance = 1.0 there is no bloom filter, so the index has to tell whether an overlapping
+     * sstable holds a partition. An overlapping sstable whose key range merely covers a partition must not keep that
+     * partition's tombstones from being purged (CASSANDRA-14944).
+     */
+    @Test
+    public void testMaxPurgeableTimestampWithoutBloomFilter()
+    {
+        Keyspace keyspace = Keyspace.open(KEYSPACE);
+        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(CF_NO_BLOOM_FILTER);
+        cfs.truncateBlocking();
+        cfs.disableAutoCompaction();
+
+        // sorted in token order, so the test does not depend on the partitioner
+        DecoratedKey[] keys = { Util.dk("k1"), Util.dk("k2"), Util.dk("k3") };
+        Arrays.sort(keys);
+        DecoratedKey key1 = keys[0];
+        DecoratedKey key2 = keys[1];
+        DecoratedKey key3 = keys[2];
+
+        long timestamp1 = FBUtilities.timestampMicros(); // oldest timestamp
+        long timestamp2 = timestamp1 + 5; // latest timestamp
+
+        // the overlapping sstable holds key1 and key3, so its key range covers key2, which it does not hold
+        applyMutation(cfs.metadata(), key1, timestamp1);
+        applyMutation(cfs.metadata(), key3, timestamp1);
+        Util.flush(cfs);
+        SSTableReader overlapping = Iterables.getOnlyElement(cfs.getLiveSSTables());
+
+        // the compacting sstable holds newer tombstones for key1 and key2
+        applyDeleteMutation(cfs.metadata(), key1, timestamp2);
+        applyDeleteMutation(cfs.metadata(), key2, timestamp2);
+        Util.flush(cfs);
+        Set<SSTableReader> compacting = Sets.newHashSet(cfs.getLiveSSTables());
+        compacting.remove(overlapping);
+        assertEquals(1, compacting.size());
+
+        // the sstables really have no bloom filter, and the overlapping sstable is checked for key2 but does not hold it
+        for (SSTableReader sstable : cfs.getLiveSSTables())
+            assertEquals(0, ((SSTableReaderWithFilter) sstable).getFilterOffHeapSize());
+        assertTrue(cfs.getOverlappingLiveSSTables(compacting).contains(overlapping));
+        assertTrue(overlapping.getPosition(key2, SSTableReader.Operator.EQ, false) < 0);
+
+        // keys are evaluated in token order, as compaction does
+        try (CompactionController controller = new CompactionController(cfs, compacting, 0))
+        {
+            // the overlapping sstable holds older data for key1, so the tombstone for key1 must be kept
+            assertPurgeBoundary(controller.getPurgeEvaluator(key1), timestamp1);
+            // no other sstable holds key2, so the tombstone for key2 can be purged
+            assertTrue("a tombstone for a partition that no overlapping sstable holds should be purgeable",
+                       controller.getPurgeEvaluator(key2).test(timestamp2));
         }
     }
 

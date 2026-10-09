@@ -71,7 +71,7 @@ public abstract class SSTableReaderWithFilter extends SSTableReader
     {
         // if we don't have bloom filter(bf_fp_chance=1.0 or filter file is missing),
         // we check index file instead.
-        return !filter.isInformative() && getPosition(key, Operator.EQ, false) >= 0 || filter.isPresent(key);
+        return filter.isInformative() ? filter.isPresent(key) : getPosition(key, Operator.EQ, false) >= 0;
     }
 
     @Override
