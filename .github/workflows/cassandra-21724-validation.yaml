@@ -1,0 +1,26 @@
+# Fork-only focused validation for apache/cassandra#5236 (CASSANDRA-21724). Not part of the PR.
+name: CASSANDRA-21724 validation
+on:
+    push:
+        branches:
+            - 'validate/cassandra-21724-**'
+permissions:
+    contents: read
+jobs:
+    table-metric-tables-test-jdk17:
+        runs-on: ubuntu-latest
+        timeout-minutes: 180
+        steps:
+          - name: Checkout code
+            uses: actions/checkout@v4
+          - name: JDK 17
+            uses: actions/setup-java@v4
+            with:
+              java-version: '17'
+              distribution: 'temurin'
+          - name: Show the commits under test
+            run: git log --oneline -4
+          - name: Build jars (run-tests.sh needs a prior build)
+            run: .build/docker/build-jars.sh 17
+          - name: Run TableMetricTablesTest
+            run: .build/docker/run-tests.sh -a test -t TableMetricTablesTest -j 17
