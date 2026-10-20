@@ -1,0 +1,91 @@
+# Fork-only focused validation for CASSANDRA-21751 (decimal validate accepts a 4-byte scale with no unscaled value).
+# Not part of the upstream patch.
+name: Cassandra 21751 decimal validation
+on:
+    push:
+        branches:
+            - 'validate/cassandra-21751-**'
+permissions:
+    contents: read
+env:
+    # run-tests.sh exits 0 when tests fail (unless --summary, which hides the full output), so every run is
+    # judged from its JUnit XML: each listed class must have results, the expected failures must fail, and
+    # nothing else may fail. Usage: python3 -c "$CHECK_JUNIT" <Class,...> [<Class.method,...> expected to fail]
+    CHECK_JUNIT: |
+        import glob, sys
+        import xml.etree.ElementTree as ET
+        classes = sys.argv[1].split(',')
+        expected = set(sys.argv[2].split(',')) if len(sys.argv) > 2 else set()
+        files = sorted(glob.glob('build/**/TEST-*.xml', recursive=True))
+        print('\n'.join(files) or 'no TEST-*.xml found under build/')
+        results = {}
+        for f in files:
+            for case in ET.parse(f).getroot().iter('testcase'):
+                cls = case.get('classname', '').rsplit('.', 1)[-1]
+                if cls in classes:
+                    name = cls + '.' + case.get('name', '').split('-')[0]
+                    if case.find('failure') is not None or case.find('error') is not None:
+                        results[name] = 'FAILED'
+                    else:
+                        results.setdefault(name, 'skipped' if case.find('skipped') is not None else 'passed')
+        for name in sorted(results):
+            print(results[name], name)
+        problems = ['no results for ' + c for c in classes if not any(n.startswith(c + '.') for n in results)]
+        problems += ['expected to fail but ' + results.get(n, 'missing') + ': ' + n for n in sorted(expected) if results.get(n) != 'FAILED']
+        problems += ['unexpected failure: ' + n for n in sorted(results) if results[n] == 'FAILED' and n not in expected]
+        print('\n'.join(problems) or 'OK')
+        sys.exit(1 if problems else 0)
+jobs:
+    # The fix applied: the new tests and the existing decimal and type validation tests must pass.
+    decimal-tests-jdk17:
+        runs-on: ubuntu-latest
+        timeout-minutes: 120
+        steps:
+          - name: Checkout code
+            uses: actions/checkout@v4
+          - name: JDK 17
+            uses: actions/setup-java@v4
+            with:
+              java-version: '17'
+              distribution: 'temurin'
+          - name: Show the commits under test
+            run: git log --oneline -4
+          - name: Build jars (run-tests.sh needs a prior build)
+            run: .build/docker/build-jars.sh 17
+          # -t takes a comma-separated list. Each entry is a grep pattern over test/unit paths, and the
+          # leading slash anchors the start of the file name.
+          - name: Run the new and related tests
+            run: .build/docker/run-tests.sh -a test -t /DecimalSerializerTest,/DecimalTypeTest,/TypeValidationTest,/TypeTest -j 17
+          - name: Check the results
+            run: python3 -c "$CHECK_JUNIT" DecimalSerializerTest,DecimalTypeTest,TypeValidationTest,TypeTest
+
+    # The fix reverted, new tests kept: the two rejection tests must fail and every other test in their classes must pass.
+    new-tests-fail-without-fix-jdk17:
+        runs-on: ubuntu-latest
+        timeout-minutes: 120
+        env:
+            # apache/cassandra trunk commit that this branch was cut from
+            BASE_SHA: 95b178a141824a0414c4add9b5ab87eaa1ca13bf
+            # failures are expected here, so skip run-tests.sh's docker debug dump
+            SKIP_DOCKER_DEBUG_ON_FAIL: true
+        steps:
+          - name: Checkout code
+            uses: actions/checkout@v4
+          - name: JDK 17
+            uses: actions/setup-java@v4
+            with:
+              java-version: '17'
+              distribution: 'temurin'
+          - name: Restore the unfixed serializer from the base commit, keeping the new tests
+            run: |
+              git fetch --no-tags --depth=1 https://github.com/apache/cassandra.git "$BASE_SHA"
+              git checkout "$BASE_SHA" -- src/java/org/apache/cassandra/serializers/DecimalSerializer.java
+              git status --short
+              grep -n 'size(value) < 4' src/java/org/apache/cassandra/serializers/DecimalSerializer.java
+          - name: Build jars (run-tests.sh needs a prior build)
+            run: .build/docker/build-jars.sh 17
+          - name: Run the new test classes (the rejection tests are expected to fail)
+            continue-on-error: true
+            run: .build/docker/run-tests.sh -a test -t /DecimalSerializerTest,/TypeTest -j 17
+          - name: Check that exactly the two rejection tests failed
+            run: python3 -c "$CHECK_JUNIT" DecimalSerializerTest,TypeTest DecimalSerializerTest.testValidateRejectsMissingUnscaledValue,TypeTest.testDecimalWithoutUnscaledValueIsRejected
