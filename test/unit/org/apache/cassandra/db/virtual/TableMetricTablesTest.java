@@ -48,35 +48,35 @@ public class TableMetricTablesTest extends CQLTester
     private static final String KS_NAME = "vts";
     private static final String LATENCY_TABLE = "test_latency";
 
-    private static final List<String> LATENCY_TABLES = List.of("local_read_latency",
-                                                               "local_scan_latency",
-                                                               "local_write_latency",
-                                                               "coordinator_read_latency",
-                                                               "coordinator_scan_latency",
-                                                               "coordinator_write_latency");
+    private static final List<String> LATENCY_TABLES = ImmutableList.of("local_read_latency",
+                                                                        "local_scan_latency",
+                                                                        "local_write_latency",
+                                                                        "coordinator_read_latency",
+                                                                        "coordinator_scan_latency",
+                                                                        "coordinator_write_latency");
 
-    private static final List<String> LATENCY_COLUMNS = List.of("p50th_ms", "p99th_ms", "max_ms");
+    private static final List<String> LATENCY_COLUMNS = ImmutableList.of("p50th_ms", "p99th_ms", "max_ms");
 
     @BeforeClass
     public static void setup()
     {
-        addVirtualKeyspace();
+        VirtualKeyspaceRegistry.instance.register(new VirtualKeyspace(VIRTUAL_VIEWS, TableMetricTables.getAll(VIRTUAL_VIEWS)));
     }
 
     @Test
-    public void testLatencyIsReportedInMilliseconds()
+    public void testLatencyIsReportedInMilliseconds() throws Throwable
     {
         assertLatencyTablesReport(MILLISECONDS.toMicros(5));
     }
 
     @Test
-    public void testSubMillisecondLatencyIsNotRoundedToZero()
+    public void testSubMillisecondLatencyIsNotRoundedToZero() throws Throwable
     {
         assertLatencyTablesReport(250);
     }
 
     @Test
-    public void testColumnsWithoutMsSuffixAreNotConverted()
+    public void testColumnsWithoutMsSuffixAreNotConverted() throws Throwable
     {
         // A real timer reports a five minute rate of 0 until its meter ticks, so use one that reports fixed values
         Timer timer = new Timer()
@@ -110,13 +110,13 @@ public class TableMetricTablesTest extends CQLTester
     }
 
     @Test
-    public void testLatencyIsReportedInMillisecondsForAnyTimerUnit()
+    public void testLatencyIsReportedInMillisecondsForAnyTimerUnit() throws Throwable
     {
         createTable("CREATE TABLE %s (pk int PRIMARY KEY, v int)");
         double savedFactor = TableMetricTables.TIMER_UNIT_TO_MS;
         try
         {
-            for (TimeUnit timerUnit : List.of(MILLISECONDS, MICROSECONDS, NANOSECONDS))
+            for (TimeUnit timerUnit : ImmutableList.of(MILLISECONDS, MICROSECONDS, NANOSECONDS))
             {
                 // Created the way Metrics.timer() would create it if timerUnit were the DEFAULT_TIMER_UNIT
                 SnapshottingTimer timer = new SnapshottingTimer(CassandraMetricsRegistry.createReservoir(timerUnit));
@@ -131,7 +131,7 @@ public class TableMetricTablesTest extends CQLTester
         }
     }
 
-    private void assertLatencyTablesReport(long latencyMicros)
+    private void assertLatencyTablesReport(long latencyMicros) throws Throwable
     {
         createTable("CREATE TABLE %s (pk int PRIMARY KEY, v int)");
         TableMetrics metrics = getCurrentColumnFamilyStore().metric;
@@ -165,7 +165,7 @@ public class TableMetricTablesTest extends CQLTester
         }
     }
 
-    private UntypedResultSet.Row queryLatencyTable(VirtualTable table)
+    private UntypedResultSet.Row queryLatencyTable(VirtualTable table) throws Throwable
     {
         VirtualKeyspaceRegistry.instance.register(new VirtualKeyspace(KS_NAME, ImmutableList.of(table)));
         // Every table gets a row, all reporting the given metric
