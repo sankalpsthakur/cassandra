@@ -48,19 +48,19 @@ public class TableMetricTablesTest extends CQLTester
     private static final String KS_NAME = "vts";
     private static final String LATENCY_TABLE = "test_latency";
 
-    private static final List<String> LATENCY_TABLES = List.of("local_read_latency",
-                                                               "local_scan_latency",
-                                                               "local_write_latency",
-                                                               "coordinator_read_latency",
-                                                               "coordinator_scan_latency",
-                                                               "coordinator_write_latency");
+    private static final List<String> LATENCY_TABLES = ImmutableList.of("local_read_latency",
+                                                                        "local_scan_latency",
+                                                                        "local_write_latency",
+                                                                        "coordinator_read_latency",
+                                                                        "coordinator_scan_latency",
+                                                                        "coordinator_write_latency");
 
-    private static final List<String> LATENCY_COLUMNS = List.of("p50th_ms", "p99th_ms", "max_ms");
+    private static final List<String> LATENCY_COLUMNS = ImmutableList.of("p50th_ms", "p99th_ms", "max_ms");
 
     @BeforeClass
     public static void setup()
     {
-        addVirtualKeyspace();
+        VirtualKeyspaceRegistry.instance.register(new VirtualKeyspace(VIRTUAL_VIEWS, TableMetricTables.getAll(VIRTUAL_VIEWS)));
     }
 
     @Test
@@ -116,7 +116,7 @@ public class TableMetricTablesTest extends CQLTester
         double savedFactor = TableMetricTables.TIMER_UNIT_TO_MS;
         try
         {
-            for (TimeUnit timerUnit : List.of(MILLISECONDS, MICROSECONDS, NANOSECONDS))
+            for (TimeUnit timerUnit : ImmutableList.of(MILLISECONDS, MICROSECONDS, NANOSECONDS))
             {
                 // Created the way Metrics.timer() would create it if timerUnit were the DEFAULT_TIMER_UNIT
                 SnapshottingTimer timer = new SnapshottingTimer(CassandraMetricsRegistry.createReservoir(timerUnit));
