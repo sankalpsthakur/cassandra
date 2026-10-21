@@ -1,0 +1,135 @@
+# Fork-only validation of one backport. Not part of the patch.
+name: Fork validation
+on:
+    push:
+        branches:
+            - 'validate/c5236-**'
+permissions:
+    contents: read
+env:
+    # apache/cassandra tip of the branch the patch was cut from
+    BASE_SHA: dd1affb148a24dc6192de0c6b5e50921513ba178
+jobs:
+    # The patch as committed: the new test and the LatencyMetrics tests must pass.
+    with-patch:
+        name: with-patch-jdk${{ matrix.jdk }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 90
+        strategy:
+            fail-fast: false
+            matrix:
+                jdk: ['11', '17']
+        steps:
+          - name: Checkout code
+            uses: actions/checkout@v4
+          - name: JDK ${{ matrix.jdk }}
+            uses: actions/setup-java@v4
+            with:
+              java-version: ${{ matrix.jdk }}
+              distribution: 'temurin'
+          - name: Commits under test
+            run: git log --format='%h %an | %cn | %s' -4
+          - name: Build jars (run-tests.sh needs a prior build)
+            run: .build/docker/build-jars.sh ${{ matrix.jdk }}
+          # -t takes a comma-separated list of grep patterns over the test/unit paths
+          - name: Run the new test and the LatencyMetrics tests
+            continue-on-error: true
+            run: .build/docker/run-tests.sh -a test -t /TableMetricTablesTest,/LatencyMetricsTest -j ${{ matrix.jdk }}
+          - name: Check the results
+            run: python3 .github/validate/check_junit.py pass TableMetricTablesTest,LatencyMetricsTest
+
+    # Same tree with only the conversion logic reverted: the new test must fail on its assertions.
+    without-patch:
+        name: without-patch-jdk11
+        runs-on: ubuntu-latest
+        timeout-minutes: 90
+        env:
+            # failures are expected here, so skip run-tests.sh's docker debug dump
+            SKIP_DOCKER_DEBUG_ON_FAIL: true
+        steps:
+          - name: Checkout code
+            uses: actions/checkout@v4
+          - name: JDK 11
+            uses: actions/setup-java@v4
+            with:
+              java-version: '11'
+              distribution: 'temurin'
+          # The new test calls toMsFactor, TIMER_UNIT_TO_MS and latencyTable, so restoring the whole file would not
+          # compile. Revert only the multiplier in LatencyTableMetric.add (back to the pre-patch constant 0.000001) and
+          # restore LatencyMetrics.java from the base branch; the test hooks stay but no longer influence the output.
+          - name: Revert the conversion logic, keep the new test and its hooks
+            run: |
+              f=src/java/org/apache/cassandra/db/virtual/TableMetricTables.java
+              test "$(grep -c 'value \*= TIMER_UNIT_TO_MS;' $f)" = 1
+              sed -i 's|value \*= TIMER_UNIT_TO_MS;|value *= 0.000001; // NS_TO_MS, as before the patch|' $f
+              git fetch --no-tags --depth=1 https://github.com/apache/cassandra.git "$BASE_SHA"
+              git checkout "$BASE_SHA" -- src/java/org/apache/cassandra/metrics/LatencyMetrics.java
+              git status --short
+              git diff HEAD -U1 -- src
+              grep -n 'value \*= ' $f
+              grep -n 'createReservoir' src/java/org/apache/cassandra/metrics/LatencyMetrics.java
+          - name: Build jars (run-tests.sh needs a prior build)
+            run: .build/docker/build-jars.sh 11
+          - name: Run the new test (its assertions are expected to fail)
+            continue-on-error: true
+            run: .build/docker/run-tests.sh -a test -t /TableMetricTablesTest -j 11
+          - name: Check that all four new test methods failed on their assertions
+            run: python3 .github/validate/check_junit.py fail-before TableMetricTablesTest.testLatencyIsReportedInMilliseconds,TableMetricTablesTest.testSubMillisecondLatencyIsNotRoundedToZero,TableMetricTablesTest.testColumnsWithoutMsSuffixAreNotConverted,TableMetricTablesTest.testLatencyIsReportedInMillisecondsForAnyTimerUnit
+
+    # Regression sweep: every test class in org.apache.cassandra.db.virtual.
+    virtual-package:
+        name: db-virtual-package-jdk11
+        runs-on: ubuntu-latest
+        timeout-minutes: 120
+        steps:
+          - name: Checkout code
+            uses: actions/checkout@v4
+          - name: JDK 11
+            uses: actions/setup-java@v4
+            with:
+              java-version: '11'
+              distribution: 'temurin'
+          - name: Build jars (run-tests.sh needs a prior build)
+            run: .build/docker/build-jars.sh 11
+          - name: Run all tests of org.apache.cassandra.db.virtual
+            continue-on-error: true
+            run: .build/docker/run-tests.sh -a test -t org/apache/cassandra/db/virtual/ -j 11
+          - name: Check the results
+            run: python3 .github/validate/check_junit.py sweep test/unit/org/apache/cassandra/db/virtual
+
+    # The committer's 4.1 commit cherry-picked onto this branch, test file byte-identical to his. Its test is expected NOT
+    # to compile here, so green means "failed to compile as predicted"; the compile errors are printed in the log.
+    his-commit-test-compile-expected-to-fail:
+        name: his-commit-test-compile-expected-to-fail-jdk11
+        runs-on: ubuntu-latest
+        timeout-minutes: 60
+        env:
+            # blob of TableMetricTablesTest.java in bdee3cc09a
+            HIS_TEST_BLOB: e6aab64fe850150f8b3987fbac29771a042a720d
+        steps:
+          - name: Checkout code
+            uses: actions/checkout@v4
+            with:
+              fetch-depth: 4
+          - name: JDK 11
+            uses: actions/setup-java@v4
+            with:
+              java-version: '11'
+              distribution: 'temurin'
+          - name: Check out the cherry-pick of his commit, before the test-only commit
+            run: |
+              git log --format='%h %an | %cn | %s' -4
+              git diff --quiet HEAD~2 HEAD~1 -- src
+              git checkout --detach HEAD~2
+              git log -1 --format='now at %h %an | %cn | %s'
+              test "$(git rev-parse HEAD:test/unit/org/apache/cassandra/db/virtual/TableMetricTablesTest.java)" = "$HIS_TEST_BLOB"
+          - name: Build jars and test classes (his test is expected not to compile)
+            run: |
+              set +e
+              .build/docker/build-jars.sh 11 > build.log 2>&1
+              echo "build-jars.sh exit code: $?"
+              grep -n -A3 'error:' build.log | head -60
+              echo "---- judgement"
+              grep -q 'TableMetricTablesTest.java:[0-9]*: error: cannot find symbol' build.log || { echo "UNEXPECTED: no cannot-find-symbol error in the test"; exit 1; }
+              grep -A3 'TableMetricTablesTest.java:[0-9]*: error: cannot find symbol' build.log | grep -q 'addVirtualKeyspace' || { echo "UNEXPECTED: addVirtualKeyspace is not among the missing symbols"; exit 1; }
+              echo "OK: his test fails to compile here, as predicted"
