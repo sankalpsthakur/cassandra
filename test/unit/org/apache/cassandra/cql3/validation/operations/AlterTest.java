@@ -582,6 +582,66 @@ public class AlterTest extends CQLTester
         }
     }
 
+    /**
+     * CASSANDRA-21761: dropped UDT columns are recorded as tuples, so re-adding the same
+     * frozen user type (or a collection/tuple containing that UDT) must still be allowed.
+     * Non-frozen UDT columns cannot be dropped; re-adding a frozen UDT as non-frozen,
+     * and genuinely incompatible UDT definitions, must still be rejected.
+     */
+    @Test
+    public void testDropAndReaddUserTypeColumns() throws Throwable
+    {
+        String udt = createType("CREATE TYPE %s (a int, b text)");
+        String nested = createType("CREATE TYPE %s (inner frozen<" + udt + ">, n int)");
+        String incompatible = createType("CREATE TYPE %s (a text, b int)");
+        String fewerFields = createType("CREATE TYPE %s (a int)");
+
+        createTable("CREATE TABLE %s (p int PRIMARY KEY, x frozen<" + udt + ">)");
+        execute("INSERT INTO %s (p, x) VALUES (1, {a: 1, b: 'foo'})");
+        alterTable("ALTER TABLE %s DROP x");
+        alterTable("ALTER TABLE %s ADD x frozen<" + udt + ">");
+        assertRows(execute("SELECT p, x FROM %s"), row(1, null));
+        execute("INSERT INTO %s (p, x) VALUES (1, {a: 2, b: 'bar'})");
+        assertRows(execute("SELECT p, x FROM %s"), row(1, userType("a", 2, "b", "bar")));
+
+        // Non-frozen UDT columns cannot be dropped, so they cannot be re-added either.
+        createTable("CREATE TABLE %s (p int PRIMARY KEY, x " + udt + ")");
+        assertInvalidMessage("Cannot drop non-frozen column x of user type " + udt,
+                             "ALTER TABLE %s DROP x");
+
+        // Re-adding a dropped frozen UDT as a non-frozen UDT remains incompatible.
+        createTable("CREATE TABLE %s (p int PRIMARY KEY, x frozen<" + udt + ">)");
+        alterTable("ALTER TABLE %s DROP x");
+        assertInvalidMessage("incompatible with previously dropped column 'x' of type frozen<tuple<int, text>>",
+                             "ALTER TABLE %s ADD x " + udt);
+
+        for (String type : new String[] {
+                "list<frozen<" + udt + ">>",
+                "set<frozen<" + udt + ">>",
+                "map<int, frozen<" + udt + ">>",
+                "frozen<list<frozen<" + udt + ">>>",
+                "tuple<int, frozen<" + udt + ">>",
+                "frozen<" + nested + ">"
+        })
+        {
+            createTable("CREATE TABLE %s (p int PRIMARY KEY, x " + type + ")");
+            alterTable("ALTER TABLE %s DROP x");
+            alterTable("ALTER TABLE %s ADD x " + type);
+        }
+
+        createTable("CREATE TABLE %s (p int PRIMARY KEY, x frozen<" + udt + ">)");
+        alterTable("ALTER TABLE %s DROP x");
+        assertInvalidMessage("incompatible with previously dropped column 'x' of type frozen<tuple<int, text>>",
+                             "ALTER TABLE %s ADD x frozen<" + incompatible + ">");
+        assertInvalidMessage("incompatible with previously dropped column 'x' of type frozen<tuple<int, text>>",
+                             "ALTER TABLE %s ADD x frozen<" + fewerFields + ">");
+
+        createTable("CREATE TABLE %s (p int PRIMARY KEY, x list<frozen<" + udt + ">>)");
+        alterTable("ALTER TABLE %s DROP x");
+        assertInvalidMessage("incompatible with previously dropped column 'x' of type list<frozen<tuple<int, text>>>",
+                             "ALTER TABLE %s ADD x list<frozen<" + incompatible + ">>");
+    }
+
     @Test(expected = InvalidRequestException.class)
     public void testDropFixedAddVariable() throws Throwable
     {
