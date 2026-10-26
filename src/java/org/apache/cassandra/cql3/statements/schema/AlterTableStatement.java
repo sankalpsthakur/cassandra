@@ -381,7 +381,11 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
             {
                 // After #8099, not safe to re-add columns of incompatible types - until *maybe* deser logic with dropped
                 // columns is pushed deeper down the line. The latter would still be problematic in cases of schema races.
-                if (!type.isSerializationCompatibleWith(droppedColumn.type))
+                // Dropped UDT columns are stored expanded to tuples (TableMetadata.Builder#recordColumnDrop).
+                // Compare the expanded form, but keep the original multi-cell flag so a frozen UDT cannot be
+                // re-added as a non-frozen UDT (expandUserTypes() always yields a frozen tuple).
+                if (type.isMultiCell() != droppedColumn.type.isMultiCell()
+                    || !type.expandUserTypes().isSerializationCompatibleWith(droppedColumn.type))
                 {
                     throw ire("Cannot add a column '%s' of type %s, incompatible with previously dropped column '%s' of type %s",
                               name,
